@@ -21,7 +21,15 @@ function loadPrefs() {
 }
 function savePrefs() { try { localStorage.setItem(PREFS_KEY, JSON.stringify(prefs)); } catch {} }
 
-function persist() { localStorage.setItem(LIB_KEY, JSON.stringify(lib)); }
+// The lookup cache shares this storage. If it's full, the library wins: clear the cache and retry.
+function persist() {
+  const text = JSON.stringify(lib);
+  try { localStorage.setItem(LIB_KEY, text); return; } catch {}
+  api.clearCache();
+  try { localStorage.setItem(LIB_KEY, text); } catch {
+    toast(gist.settings().token ? "This device's storage is full. Changes are kept by sync only." : "This device's storage is full: your last change wasn't saved. Download a backup in Sync.");
+  }
+}
 
 function putEntry(entry) {
   lib = { ...lib, books: { ...lib.books, [entry.id]: entry } };
@@ -87,7 +95,8 @@ function failed(err, retry = true) {
 
 function parseRoute() {
   const [path, query = ''] = location.hash.replace(/^#\/?/, '').split('?');
-  const parts = path.split('/').filter(Boolean).map(decodeURIComponent);
+  const decode = s => { try { return decodeURIComponent(s); } catch { return s; } }; // a stray % in a pasted link
+  const parts = path.split('/').filter(Boolean).map(decode);
   return { name: parts[0] || 'shelf', args: parts.slice(1), query: new URLSearchParams(query) };
 }
 
@@ -255,11 +264,11 @@ function resultRow(b) {
 
 async function addBook(id, status, meta) {
   const existing = lib.books[id];
-  let m = meta;
-  if (!m) { try { m = await api.work(id); } catch { m = null; } }
+  const [workRes, seriesRes] = await Promise.allSettled([meta || api.work(id), api.seriesForWork(id)]);
+  const m = workRes.value;
   if (!m) { toast("Couldn't reach Open Library"); return null; }
-  let series = [], seriesChecked = false;
-  try { series = await api.seriesForWork(id); seriesChecked = true; } catch {}
+  const seriesChecked = seriesRes.status === 'fulfilled';
+  const series = seriesChecked ? seriesRes.value : [];
   const entry = existing && !existing.deleted ? core.setStatus(existing, status) : { ...core.newEntry({ ...m, id, series }, status), seriesChecked };
   putEntry(entry);
   return entry;
@@ -310,9 +319,15 @@ async function startScan(token, msg) {
     return true;
   };
   // Chrome on Android/desktop has a native detector; Safari (iPhone, Mac) needs the ZXing library.
-  if ('BarcodeDetector' in window && (await BarcodeDetector.getSupportedFormats?.())?.includes('ean_13')) {
-    scanStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment', width: { ideal: 1280 } } });
-    if (!current(token)) return stopScan();
+  const native = 'BarcodeDetector' in window && (await BarcodeDetector.getSupportedFormats?.())?.includes('ean_13');
+  if (!native && !window.ZXing) await loadScript('vendor/zxing.min.js');
+  if (!current(token)) return;
+  // Open the camera here for both paths, so leaving the page while it starts always switches it off
+  const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment', width: { ideal: 1280 } } });
+  if (!current(token) || route.name !== 'scan') { stream.getTracks().forEach(t => t.stop()); return; }
+  stopScan();
+  scanStream = stream;
+  if (native) {
     video.srcObject = scanStream;
     await video.play();
     msg.textContent = 'Point the camera at the barcode on the back cover.';
@@ -328,14 +343,13 @@ async function startScan(token, msg) {
     tick();
     return;
   }
-  if (!window.ZXing) await loadScript('vendor/zxing.min.js');
-  if (!current(token)) return;
   const hints = new Map([[ZXing.DecodeHintType.POSSIBLE_FORMATS, [ZXing.BarcodeFormat.EAN_13]], [ZXing.DecodeHintType.TRY_HARDER, true]]);
   scanReader = new ZXing.BrowserMultiFormatReader(hints, 200);
-  await scanReader.decodeFromConstraints({ video: { facingMode: 'environment', width: { ideal: 1280 } } }, video, result => {
-    if (result) onCode(result.getText());
-  });
   msg.textContent = 'Point the camera at the barcode on the back cover.';
+  // Runs until stopScan() resets the reader; not awaited
+  scanReader.decodeFromStream(scanStream, video, result => {
+    if (result) onCode(result.getText());
+  }).catch(() => {});
 }
 
 function stopScan() {
@@ -370,22 +384,20 @@ async function viewBook(token, id) {
   const e = entryFor(id);
   if (!e) loading();
   else drawBook(id, e, null);
-  let w = null;
-  try { w = await api.work(id); } catch (err) { if (!e) throw err; }
+  // Book details (Open Library) and series (Wikidata) are separate services: ask both at once.
+  // Series is needed for books not in the library, and for entries added offline that never looked it up.
+  const needSeries = !e || (!e.seriesChecked && navigator.onLine);
+  const [workRes, seriesRes] = await Promise.allSettled([api.work(id), needSeries ? api.seriesForWork(id) : null]);
+  if (workRes.status === 'rejected' && !e) throw workRes.reason;
+  const w = workRes.value || null;
   if (!current(token)) return;
-  // Older entries, or ones added offline, may never have looked up their series
   let entry = entryFor(id);
-  if (entry && !entry.seriesChecked && navigator.onLine) {
-    try {
-      const series = await api.seriesForWork(id);
-      entry = { ...entryFor(id), series, seriesChecked: true };
-      lib = { ...lib, books: { ...lib.books, [id]: entry } };
-      persist(); // not a user edit: no sync, no updated bump
-    } catch {}
+  if (entry && !entry.seriesChecked && seriesRes.status === 'fulfilled' && seriesRes.value) {
+    entry = { ...entry, series: seriesRes.value, seriesChecked: true };
+    lib = { ...lib, books: { ...lib.books, [id]: entry } };
+    persist(); // not a user edit: no sync, no updated bump
   }
-  let series = entry?.series;
-  if (!entry) { try { series = await api.seriesForWork(id); } catch { series = []; } }
-  if (!current(token)) return;
+  const series = entry ? entry.series : seriesRes.status === 'fulfilled' && seriesRes.value ? seriesRes.value : [];
   drawBook(id, entry, w, series);
 }
 
@@ -507,7 +519,7 @@ async function viewAuthor(token, id) {
     ${extra.length ? `<div class="section"><h2>Also in your library</h2></div><div class="grid">${extra.map(b => tile(b, { author: '' })).join('')}</div>` : ''}
     ${works.other.length ? `<details class="more"><summary>Short fiction and other writing (${works.other.length})</summary>
       <div class="list">${works.other.map(b => b.ol ? `<a class="li" href="#/book/${esc(b.ol)}"><span>${esc(b.title)}</span>${b.ol && entryFor(b.ol) ? `<span class="badge ${entryFor(b.ol).status}">${core.STATUS_LABEL[entryFor(b.ol).status]}</span>` : ''}<span class="yr">${b.year || ''}</span></a>` : `<button class="li" data-act="find" data-title="${esc(b.title)}" data-author="${esc(authorName)}"><span>${esc(b.title)}</span><span class="yr">${b.year || ''}</span></button>`).join('')}</div></details>` : ''}
-    <p class="source">${works.source === 'wikidata' ? 'Bibliography and series: Wikidata. Covers and details: Open Library.' : 'Books: Open Library (no series information for this author).'} ${a.wikipedia ? `· <a href="${esc(a.wikipedia)}" target="_blank" rel="noopener">Wikipedia</a>` : ''}</p>`;
+    <p class="source">${works.source === 'wikidata' ? 'Bibliography and series: Wikidata. Covers and details: Open Library.' : 'Books: Open Library (no series information for this author).'} ${api.webUrl(a.wikipedia) ? `· <a href="${esc(api.webUrl(a.wikipedia))}" target="_blank" rel="noopener">Wikipedia</a>` : ''}</p>`;
 
   document.getElementById('author-progress').innerHTML = totalCount ? `<div class="progress" aria-hidden="true"><span style="width:${Math.round(100 * readCount / totalCount)}%"></span></div><div class="small muted">You've read ${readCount} of ${totalCount} books</div>` : '';
   fillCovers($view, [...all, ...works.other].map(b => b.ol));
@@ -662,16 +674,15 @@ async function runSync() {
   syncing = true;
   setDot('busy', 'Syncing…');
   try {
-    const sent = lib;
-    const merged = await gist.sync(sent);
+    const merged = await gist.sync(lib);
     if (merged) {
-      // Edits made while the sync was in flight are newer and win this merge
-      const { merged: m, localChanged } = core.merge(lib, merged);
-      const changed = localChanged;
+      // Edits made while the sync was in flight are newer and win this merge;
+      // if there were any, the gist doesn't have them yet, so go round again.
+      const { merged: m, localChanged, remoteChanged } = core.merge(lib, merged);
       lib = m; persist();
-      if (lib !== sent && core.merge(merged, lib).localChanged) syncAgain = true;
-      if (changed && !['book', 'settings'].includes(route.name)) render();
-      else if (changed && route.name === 'book' && document.activeElement?.id !== 'notes') render();
+      if (remoteChanged) syncAgain = true;
+      const typing = route.name === 'settings' || document.activeElement?.id === 'notes';
+      if (localChanged && !typing) render();
     }
     syncError = '';
     setDot('ok', `Synced ${new Date().toLocaleTimeString()}`);

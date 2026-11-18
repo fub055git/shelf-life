@@ -45,12 +45,20 @@ export function setStatus(entry, status, now = Date.now()) {
   const e = { ...entry, reads: entry.reads.map(r => ({ ...r })), status, updated: now };
   const date = today(new Date(now));
   const open = e.reads.find(r => !r.end);
-  if (status === 'reading' && !open) e.reads.push({ start: date, end: null });
+  if (status === 'reading' && entry.status !== 'reading') {
+    if (open && !open.start) open.start = date; // a blank "Add dates" row: fill it in
+    else {
+      // An unfinished read left over from a dropped attempt doesn't carry into this one
+      if (open) e.reads = e.reads.filter(r => r !== open);
+      e.reads.push({ start: date, end: null });
+    }
+  }
   if (status === 'read') {
     if (open) open.end = date;
     else if (entry.status !== 'read') e.reads.push({ start: null, end: date });
   }
-  if (status === 'want' && open && !open.start) e.reads = e.reads.filter(r => r !== open);
+  // Back to Want to read: an unfinished read didn't happen (often a mis-tap on Reading)
+  if (status === 'want') e.reads = e.reads.filter(r => r.end);
   return e;
 }
 
@@ -99,7 +107,7 @@ const SORTS = {
   added: (a, b) => (b.added || '').localeCompare(a.added || '') || b.updated - a.updated,
   finished: (a, b) => (lastRead(b) || '').localeCompare(lastRead(a) || '') || b.updated - a.updated,
   title: (a, b) => sortTitle(a.title).localeCompare(sortTitle(b.title)),
-  author: (a, b) => authorSurname(a).localeCompare(authorSurname(b)) || seriesKey(a).localeCompare(seriesKey(b)) || sortTitle(a.title).localeCompare(sortTitle(b.title)),
+  author: (a, b) => authorSurname(a).localeCompare(authorSurname(b)) || bySeries(a, b) || sortTitle(a.title).localeCompare(sortTitle(b.title)),
   rating: (a, b) => b.rating - a.rating || sortTitle(a.title).localeCompare(sortTitle(b.title)),
 };
 export const SORT_LABEL = { added: 'Date added', finished: 'Date finished', title: 'Title', author: 'Author', rating: 'Rating' };
@@ -119,9 +127,11 @@ function authorSurname(b) {
   const n = b.authors[0]?.name || '';
   return n.split(/\s+/).pop().toLowerCase();
 }
-function seriesKey(b) {
-  const s = b.series?.[0];
-  return s ? `${s.name}|${String(ordinal(s.pos)).padStart(6, '0')}` : '~';
+// Within an author: series books grouped by series name in number order, standalones after.
+function bySeries(a, b) {
+  const sa = a.series?.[0], sb = b.series?.[0];
+  if (!sa || !sb) return (sa ? 0 : 1) - (sb ? 0 : 1);
+  return sa.name.localeCompare(sb.name) || ordinal(sa.pos) - ordinal(sb.pos);
 }
 
 // Wikidata series ordinals are strings: "1", "0", "2.5", sometimes "4a" or missing.

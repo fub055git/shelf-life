@@ -1,8 +1,9 @@
-// Offline support. The app files are served from the cache and refreshed in the background,
-// so a deploy shows up the next time the app opens. Covers are cached the first time they load
-// and kept, so shelves look right offline. Book data is cached by the app itself (api.js).
-// Bump VERSION when files change together so they update as one set.
-const VERSION = 'shelf-life-v1';
+// Offline support. The app files are served from the cache. When the app is opened, the whole set of
+// app files is downloaded again in the background and swapped in only if every file arrived, so a
+// deploy shows up on the next open and the modules (app.js, core.js, api.js, sync.js) always come
+// from the same version. Covers are cached the first time they load and kept, so shelves look right
+// offline. Book data is cached by the app itself (api.js).
+const VERSION = 'shelf-life-v2';
 const COVERS = 'shelf-life-covers';
 const APP = ['./', './index.html', './style.css', './app.js', './core.js', './api.js', './sync.js', './manifest.json', './icons/icon.svg', './icons/apple-touch-icon.png', './icons/icon-192.png', './vendor/zxing.min.js'];
 const MAX_COVERS = 1500;
@@ -23,11 +24,14 @@ self.addEventListener('fetch', e => {
   const url = new URL(req.url);
 
   if (url.origin === location.origin) {
+    if (req.mode === 'navigate') e.waitUntil(refreshApp());
     e.respondWith(caches.open(VERSION).then(async cache => {
       const hit = await cache.match(req, { ignoreSearch: true });
-      const fresh = fetch(req).then(res => { if (res.ok) cache.put(req, res.clone()); return res; });
-      if (hit) { e.waitUntil(fresh.catch(() => {})); return hit; }
-      return fresh.catch(() => cache.match('./index.html'));
+      if (hit) return hit;
+      try { return await fetch(req); } catch (err) {
+        if (req.mode === 'navigate') return cache.match('./index.html');
+        throw err;
+      }
     }));
     return;
   }
@@ -46,6 +50,23 @@ self.addEventListener('fetch', e => {
     }));
   }
 });
+
+// Fetch every app file fresh; only when all of them succeed, write them into the cache together.
+// At most once a minute, so moving around the app doesn't re-download it.
+let lastRefresh = 0;
+async function refreshApp() {
+  if (Date.now() - lastRefresh < 60000) return;
+  lastRefresh = Date.now();
+  try {
+    const responses = await Promise.all(APP.map(async u => {
+      const res = await fetch(new Request(u, { cache: 'no-cache' }));
+      if (!res.ok) throw new Error(u);
+      return [u, res];
+    }));
+    const cache = await caches.open(VERSION);
+    await Promise.all(responses.map(([u, res]) => cache.put(u, res)));
+  } catch {} // offline or a file missing mid-deploy: keep the old set
+}
 
 async function trim(cache) {
   const keys = await cache.keys();

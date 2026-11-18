@@ -24,7 +24,7 @@ Everything fetched is cached in localStorage (`sl_cache_*`), for 14–30 days, s
 | `api.js` | Open Library + Wikidata fetches and the cache. The SPARQL queries live here. |
 | `sync.js` | GitHub gist sync. |
 | `app.js` | Hash router and every page: shelves, search, scan, book, author, series, stats, sync. |
-| `sw.js` | Offline app shell + cover cache. **Bump `VERSION` when files change together.** |
+| `sw.js` | Offline app shell + cover cache. On each open it re-downloads all app files and swaps them in together only if every one arrived, so modules never mix versions. Add new files to `APP`. |
 | `vendor/zxing.min.js` | `@zxing/library` 0.23.0 UMD, for barcode scanning on Safari (iPhone/Mac have no native `BarcodeDetector`). Loaded only on the Scan page. |
 | `tools/make-icons.mjs` | Draws the PNG icons (iPhone needs PNG). `npm run icons`. |
 
@@ -35,6 +35,6 @@ npm test                      # core + sync tests (node:test, no installs)
 npx serve -l 5340 .           # or the "books" config in code/.claude/launch.json
 ```
 
-The camera needs HTTPS (or localhost). The service worker serves cached files first, so reload twice to see an edit, or unregister it in dev tools.
+The camera needs HTTPS (or localhost). The service worker serves cached files first and swaps in new ones in the background, so reload twice to see an edit, or unregister it in dev tools.
 
 Test fixtures in `tests/fixtures/` are real Wikidata answers (N. K. Jemisin's works, the Discworld series) saved 18 Nov 2026.

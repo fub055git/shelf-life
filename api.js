@@ -19,7 +19,7 @@ async function cached(key, maxAge, load) {
   if (hit && Date.now() - hit.t < maxAge) return hit.v;
   try {
     const v = await load();
-    try { localStorage.setItem(k, JSON.stringify({ t: Date.now(), v })); } catch { pruneCache(); }
+    cachePut(k, v);
     return v;
   } catch (err) {
     if (hit) return hit.v; // offline or rate-limited: an old answer beats none
@@ -27,7 +27,29 @@ async function cached(key, maxAge, load) {
   }
 }
 
-// If storage fills up, drop the oldest half of the cache (never the library itself).
+// The cache shares localStorage (~5MB on Safari) with the library, so keep it well under that:
+// every so often, if it's over CACHE_BUDGET characters, drop the oldest half.
+const CACHE_BUDGET = 1_500_000;
+let writes = 0;
+function cachePut(k, v) {
+  try { localStorage.setItem(k, JSON.stringify({ t: Date.now(), v })); } catch { pruneCache(); return; }
+  if (++writes % 20 === 0) {
+    let size = 0;
+    for (const key of Object.keys(localStorage)) if (key.startsWith(CACHE_PREFIX)) size += key.length + (localStorage.getItem(key) || '').length;
+    if (size > CACHE_BUDGET) pruneCache();
+  }
+}
+
+export function clearCache() {
+  Object.keys(localStorage).filter(k => k.startsWith(CACHE_PREFIX)).forEach(k => localStorage.removeItem(k));
+}
+
+// Open Library is crowd-edited: only pass through ordinary web links (never javascript: and the like).
+export function webUrl(u) {
+  try { const url = new URL(u); return ['http:', 'https:'].includes(url.protocol) ? url.href : null; } catch { return null; }
+}
+
+// Drop the oldest half of the cache (never the library itself).
 function pruneCache() {
   const keys = Object.keys(localStorage).filter(k => k.startsWith(CACHE_PREFIX));
   const aged = keys.map(k => { try { return [k, JSON.parse(localStorage.getItem(k)).t]; } catch { return [k, 0]; } }).sort((a, b) => a[1] - b[1]);
@@ -87,7 +109,7 @@ export async function docsForWorks(ids) {
       for (const d of data.docs) {
         const b = bookFromDoc(d);
         out[b.id] = b;
-        try { localStorage.setItem(CACHE_PREFIX + 'doc_' + b.id, JSON.stringify({ t: Date.now(), v: b })); } catch { pruneCache(); }
+        cachePut(CACHE_PREFIX + 'doc_' + b.id, b);
       }
     } catch {}
   }
@@ -148,7 +170,7 @@ export function author(id) {
       id, wd, name: a.personal_name && a.name?.length < 4 ? a.personal_name : a.name,
       bio: tidyDescription(bio), born: a.birth_date || null, died: a.death_date || null,
       photo: (a.photos || []).find(p => p > 0) || null,
-      wikipedia: a.wikipedia || (a.links || []).find(l => /wikipedia/.test(l.url))?.url || null,
+      wikipedia: webUrl(a.wikipedia) || webUrl((a.links || []).find(l => /wikipedia/.test(l?.url))?.url),
     };
   });
 }

@@ -29,6 +29,27 @@ test('want-to-read books have no reading dates', () => {
   assert.deepEqual(core.newEntry(meta, 'want', T0).reads, []);
 });
 
+test('a mis-tap on Reading undone with Want to read leaves no dates behind', () => {
+  let e = core.setStatus(core.newEntry(meta, 'want', T0), 'reading', T0);
+  e = core.setStatus(e, 'want', T0 + DAY);
+  assert.deepEqual(e.reads, []);
+  e = core.setStatus(e, 'read', T0 + 200 * DAY);
+  assert.deepEqual(e.reads.map(r => r.start), [null]); // not the old mis-tap date
+});
+
+test('picking a dropped book up again starts a fresh read', () => {
+  let e = core.setStatus(core.newEntry(meta, 'reading', T0), 'dropped', T0 + DAY);
+  e = core.setStatus(e, 'reading', T0 + 100 * DAY);
+  assert.equal(e.reads.length, 1);
+  assert.equal(e.reads[0].start, core.today(new Date(T0 + 100 * DAY)));
+});
+
+test('a blank dates row gets the start date when the book is started', () => {
+  const e = core.setStatus({ ...core.newEntry(meta, 'want', T0), reads: [{ start: null, end: null }] }, 'reading', T0);
+  assert.equal(e.reads.length, 1);
+  assert.equal(e.reads[0].start, core.today(new Date(T0)));
+});
+
 test('read again opens a second read and keeps the first', () => {
   const e = core.readAgain(core.newEntry(meta, 'read', T0), T0 + 400 * DAY);
   assert.equal(e.status, 'reading');
@@ -79,6 +100,12 @@ test('shelves filter by status and text, and sort by surname then series order',
   assert.deepEqual(core.shelf(lib, 'read', 'title').map(b => b.id), ['c', 'b', 'a']); // "The" ignored
   assert.deepEqual(core.shelf(lib, 'read', 'added', 'leckie').map(b => b.id), ['c']);
   assert.deepEqual(core.shelf(lib, 'want').map(b => b.id), ['d']);
+});
+
+test('author sort puts series numbers in numeric order, including halves and double digits', () => {
+  const mk = (id, pos) => core.newEntry({ ...meta, id, title: id, series: [{ id: 'S', name: 'Discworld', pos }] }, 'read', T0);
+  const lib = { v: 1, books: { a: mk('a', '2'), b: mk('b', '1.5'), c: mk('c', '10'), d: mk('d', '9'), e: core.newEntry({ ...meta, id: 'e', title: 'Aaa' }, 'read', T0) } };
+  assert.deepEqual(core.shelf(lib, 'read', 'author').map(b => b.id), ['b', 'a', 'd', 'c', 'e']);
 });
 
 test('ISBN checks: valid 13 and 10 digit, typo rejected, barcode must be 978/979', () => {
